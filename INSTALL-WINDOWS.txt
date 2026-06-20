@@ -1,0 +1,92 @@
+============================================================
+ FIESTA SHN TOOLKIT - WINDOWS QUICK START
+============================================================
+
+A no-fuss checklist for getting the toolkit running on your PC.
+For the full guide, see README.md.
+
+
+STEP 1 - INSTALL PYTHON (one time)
+------------------------------------------------------------
+1. Go to:  https://www.python.org/downloads/
+2. Run the installer.
+3. IMPORTANT: on the first screen, TICK the box
+   "Add python.exe to PATH"  before clicking Install.
+
+
+STEP 2 - GET THE TOOLKIT ONTO YOUR PC
+------------------------------------------------------------
+You already have it if you downloaded/extracted this folder.
+Put it somewhere easy, for example:   C:\FiestaTools\
+You should see fiesta_shn.py and the windows\ folder there.
+
+
+STEP 3 - CONFIRM IT WORKS
+------------------------------------------------------------
+1. Press Start, type  cmd  , press Enter (opens Command Prompt).
+2. Type these two lines (press Enter after each):
+
+       cd C:\FiestaTools
+       python fiesta_shn.py selftest
+
+3. You should see several [ok] lines ending in:
+       SELFTEST PASSED
+
+   If you instead see "'python' is not recognized", Python was
+   not added to PATH - re-run the Python installer and tick
+   "Add python.exe to PATH" (Step 1).
+
+
+STEP 4 - EDIT A FILE (ALWAYS WORK ON A COPY!)
+------------------------------------------------------------
+Never edit the live server file directly. Copy it out first:
+
+       copy "C:\FiestaServer\ShineTable\Item.shn" C:\FiestaTools\
+       cd C:\FiestaTools
+
+Decode it to a spreadsheet-friendly CSV:
+
+       python fiesta_shn.py decode Item.shn
+
+   -> makes Item.csv          (this is what you edit)
+   -> makes Item.schema.json  (leave it next to the CSV)
+   It will also print "Round-trip: SAFE" - that means the file
+   is safe to edit and rebuild.
+
+Edit Item.csv in Excel or Notepad, then save it.
+
+Rebuild the .shn:
+
+       python fiesta_shn.py encode Item.csv
+
+   -> rebuilds Item.shn
+   -> saves the previous version as Item.shn.bak (automatic backup)
+
+Finally, copy the new Item.shn back onto your server
+(keep your own backup of the original too).
+
+
+EVEN EASIER - DRAG AND DROP
+------------------------------------------------------------
+Open the  windows\  folder. Then:
+  - Drag a .shn file onto  decode.bat   to decode it.
+  - Drag a .csv file onto  encode.bat   to rebuild the .shn.
+  - Drag a .shn file onto  verify.bat   to check it round-trips.
+  - Drag a .shn file onto  info.bat     to see its columns.
+
+
+TROUBLESHOOTING
+------------------------------------------------------------
+- "'python' is not recognized"
+      Python isn't on PATH. Re-run the Python installer and tick
+      "Add python.exe to PATH". Or try  py  instead of  python.
+
+- decode says "Round-trip: UNSAFE"
+      Try a different text encoding, for example:
+          python fiesta_shn.py decode File.shn --encoding latin-1
+          python fiesta_shn.py encode File.csv --encoding latin-1
+      latin-1 is lossless for any file.
+
+- Keep backups. The tool makes .bak files, but also keep your
+  own copies of the original server files before deploying edits.
+============================================================
