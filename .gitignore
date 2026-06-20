@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Fiesta data / working files (don't commit game data or generated artifacts)
+*.shn
+*.shn.bak
+*.shn.tmp
+*.csv
+*.schema.json
+!tests/**/*.csv
