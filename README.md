@@ -9,6 +9,13 @@ every time you want to tweak an item, a drop, or build a perfect set.
 Everything is one file — `fiesta_shn.py` — using only the Python 3 standard
 library. No `pip install`, no internet, nothing to set up beyond Python itself.
 
+## Remote access from iPad
+
+Want to run this (and Claude Code) on your PC from an iPad while you're away? See
+**[CONNECT-FROM-IPAD.md](CONNECT-FROM-IPAD.md)** — a step-by-step setup using
+Tailscale + Blink Shell that works whether your PC runs Claude Code in WSL or
+native Windows.
+
 ## What it does
 
 | Command  | Purpose |
