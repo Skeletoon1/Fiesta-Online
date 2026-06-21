@@ -53,7 +53,7 @@ DEFAULT_SERVER_DIR = os.environ.get(
 )
 DEFAULT_CLIENT_DIR = os.environ.get(
     "FIESTA_CLIENT_DIR",
-    r"C:\FiestaServer\NA2016-main\Client\ressystem",
+    r"C:\Users\user\Downloads\NA2016-main\NA2016-main\Client\ressystem",
 )
 DEFAULT_STOP_SCRIPT = os.environ.get(
     "FIESTA_STOP_SCRIPT",
