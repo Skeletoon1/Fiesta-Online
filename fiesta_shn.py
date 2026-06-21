@@ -35,10 +35,43 @@ SHNColumn.cs / SHNReader.cs / SHNWriter.cs).
 
 import argparse
 import csv
+import ctypes
 import json
 import os
+import shutil
 import struct
+import subprocess
 import sys
+import time
+
+# ---------------------------------------------------------------------------
+# Deploy / service defaults  (override per-call or via environment variables)
+# ---------------------------------------------------------------------------
+DEFAULT_SERVER_DIR = os.environ.get(
+    "FIESTA_SERVER_DIR",
+    r"C:\FiestaServer\NA2016-main\Server\9Data\Shine",
+)
+DEFAULT_CLIENT_DIR = os.environ.get(
+    "FIESTA_CLIENT_DIR",
+    r"C:\FiestaServer\NA2016-main\Client\ressystem",
+)
+DEFAULT_STOP_SCRIPT = os.environ.get(
+    "FIESTA_STOP_SCRIPT",
+    r"C:\FiestaServer\NA2016-main\Server\_StopServices.ps1",
+)
+DEFAULT_START_SCRIPT = os.environ.get(
+    "FIESTA_START_SCRIPT",
+    r"C:\FiestaServer\NA2016-main\Server\_StartServices.ps1",
+)
+# Windows service names in stop order (zones first); reverse for start order.
+SERVICE_NAMES = [
+    "_Zone4", "_Zone3", "_Zone2", "_Zone1", "_Zone0",
+    "_GamigoZR", "_WorldManager", "_GameLog", "_Character",
+    "_Login", "_AccountLog", "_Account",
+]
+# QuestData.shn is a different format (compiled quest blob) despite the
+# extension. Refuse to deploy it to avoid corruption.
+DEPLOY_BLOCKLIST = {"questdata.shn"}
 
 # ---------------------------------------------------------------------------
 # Cipher
@@ -572,6 +605,269 @@ def cmd_info(args):
 
 
 # ---------------------------------------------------------------------------
+# Service / deploy helpers
+# ---------------------------------------------------------------------------
+def _is_admin():
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _run_powershell(script_path):
+    """Run a .ps1 file with the bundled host. Returns (returncode, stdout, stderr)."""
+    cmd = [
+        "powershell.exe", "-NoProfile", "-NonInteractive",
+        "-ExecutionPolicy", "Bypass", "-File", script_path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    return r.returncode, r.stdout, r.stderr
+
+
+def _service_states():
+    """Return {service_name: status} via Get-Service. Missing services map to None."""
+    names_arg = ",".join("'%s'" % n for n in SERVICE_NAMES)
+    ps = (
+        "Get-Service -Name %s -ErrorAction SilentlyContinue | "
+        "ForEach-Object { \"$($_.Name)=$($_.Status)\" }"
+    ) % names_arg
+    r = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
+        capture_output=True, text=True,
+    )
+    out = {n: None for n in SERVICE_NAMES}
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if "=" in line:
+            n, s = line.split("=", 1)
+            if n in out:
+                out[n] = s
+    return out
+
+
+def _any_running(states):
+    return any(s == "Running" for s in states.values())
+
+
+def _stop_services():
+    if not os.path.exists(DEFAULT_STOP_SCRIPT):
+        return 1, "", "stop script not found: %s" % DEFAULT_STOP_SCRIPT
+    return _run_powershell(DEFAULT_STOP_SCRIPT)
+
+
+def _start_services():
+    if not os.path.exists(DEFAULT_START_SCRIPT):
+        return 1, "", "start script not found: %s" % DEFAULT_START_SCRIPT
+    return _run_powershell(DEFAULT_START_SCRIPT)
+
+
+def _wait_until(predicate, timeout_sec, interval_sec=1.0):
+    """Poll predicate() until it returns True or timeout elapses."""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval_sec)
+    return predicate()
+
+
+def _parses_as_shn(path, encoding):
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+        decode_bytes(raw, encoding)
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def cmd_deploy(args):
+    edited = args.input
+    if not os.path.exists(edited):
+        sys.stderr.write("ERROR: edited file not found: %s\n" % edited)
+        return 1
+
+    name = os.path.basename(edited)
+    if name.lower() in DEPLOY_BLOCKLIST and not args.force:
+        sys.stderr.write(
+            "ERROR: %s uses a non-standard format and is not safe to deploy "
+            "with this toolkit. Pass --force to override (DANGEROUS).\n" % name
+        )
+        return 1
+
+    ok, msg = _parses_as_shn(edited, args.encoding)
+    if not ok:
+        sys.stderr.write("ERROR: edited file does not parse as SHN: %s\n" % msg)
+        return 1
+
+    server_dir = args.server_dir or DEFAULT_SERVER_DIR
+    client_dir = args.client_dir or DEFAULT_CLIENT_DIR
+    server_target = os.path.join(server_dir, name)
+    client_target = os.path.join(client_dir, name)
+
+    if not os.path.exists(server_target):
+        sys.stderr.write(
+            "ERROR: server target not found: %s\n"
+            "  (override with --server-dir or set FIESTA_SERVER_DIR)\n"
+            % server_target
+        )
+        return 1
+
+    mirror_client = os.path.exists(client_target)
+
+    print("Plan:")
+    print("  source : %s  (%d bytes)" % (edited, os.path.getsize(edited)))
+    print("  server : %s" % server_target)
+    if mirror_client:
+        print("  client : %s  [mirrored]" % client_target)
+    else:
+        print("  client : (no matching file in client; server-only deploy)")
+
+    # Decide on service handling
+    states = _service_states()
+    running = _any_running(states)
+    will_restart = (not args.no_restart) and running
+    if args.no_restart:
+        print("  restart: skipped (--no-restart)")
+    elif not running:
+        print("  restart: skipped (services already stopped)")
+    elif not _is_admin():
+        print("  restart: SKIPPED -- not running as admin (Stop/Start-Service "
+              "requires elevation). Use --no-restart to silence, or rerun "
+              "Claude / this shell as Administrator.")
+        will_restart = False
+    else:
+        print("  restart: will stop services, swap, then start services")
+
+    if args.dry_run:
+        print("DRY-RUN: no changes made.")
+        return 0
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+
+    # Stop services first (if applicable)
+    if will_restart:
+        print("Stopping services...")
+        rc, out, err = _stop_services()
+        if rc != 0:
+            sys.stderr.write(
+                "ERROR: stop script returned %d. Aborting before file swap.\n"
+                "stdout:\n%s\nstderr:\n%s\n" % (rc, out, err)
+            )
+            return 1
+        # Wait for services to settle (Stopped or absent).
+        ok_stopped = _wait_until(
+            lambda: not _any_running(_service_states()),
+            timeout_sec=30,
+        )
+        if not ok_stopped:
+            sys.stderr.write(
+                "ERROR: services did not stop within 30s. Aborting.\n"
+            )
+            return 1
+        print("  services stopped.")
+
+    # Back up + copy + verify
+    server_bak = "%s.bak_%s" % (server_target, stamp)
+    client_bak = "%s.bak_%s" % (client_target, stamp) if mirror_client else None
+    try:
+        shutil.copy2(server_target, server_bak)
+        print("Backed up server -> %s" % server_bak)
+        if mirror_client:
+            shutil.copy2(client_target, client_bak)
+            print("Backed up client -> %s" % client_bak)
+
+        shutil.copy2(edited, server_target)
+        print("Wrote server <- %s" % server_target)
+        if mirror_client:
+            shutil.copy2(edited, client_target)
+            print("Wrote client <- %s" % client_target)
+
+        ok, msg = _parses_as_shn(server_target, args.encoding)
+        if not ok:
+            raise RuntimeError("post-deploy server re-parse failed: %s" % msg)
+        if mirror_client:
+            ok, msg = _parses_as_shn(client_target, args.encoding)
+            if not ok:
+                raise RuntimeError(
+                    "post-deploy client re-parse failed: %s" % msg
+                )
+    except Exception as exc:
+        sys.stderr.write("DEPLOY FAILED: %s\nRestoring from backup...\n" % exc)
+        try:
+            if os.path.exists(server_bak):
+                shutil.copy2(server_bak, server_target)
+                print("  server restored.")
+            if client_bak and os.path.exists(client_bak):
+                shutil.copy2(client_bak, client_target)
+                print("  client restored.")
+        except Exception as restore_exc:
+            sys.stderr.write(
+                "RESTORE ALSO FAILED: %s\nManual recovery required. "
+                "Backups: server=%s, client=%s\n"
+                % (restore_exc, server_bak, client_bak)
+            )
+        if will_restart:
+            print("Attempting to start services anyway...")
+            _start_services()
+        return 1
+
+    # Start services back up
+    if will_restart:
+        print("Starting services...")
+        rc, out, err = _start_services()
+        if rc != 0:
+            sys.stderr.write(
+                "WARNING: start script returned %d. Check status manually.\n"
+                "stdout:\n%s\nstderr:\n%s\n" % (rc, out, err)
+            )
+        else:
+            print("  services started (give them a few seconds to settle).")
+
+    print()
+    print("DEPLOY OK.")
+    if not will_restart and not args.no_restart and running:
+        print("Note: services were running but couldn't be auto-restarted. "
+              "Restart them manually for changes to take effect.")
+    elif not will_restart and not running:
+        print("Note: services were already stopped. Start them when ready.")
+    return 0
+
+
+def cmd_start(_args):
+    if not _is_admin():
+        sys.stderr.write(
+            "ERROR: starting services requires admin. Rerun as Administrator.\n"
+        )
+        return 1
+    rc, out, err = _start_services()
+    sys.stdout.write(out)
+    sys.stderr.write(err)
+    return rc
+
+
+def cmd_stop(_args):
+    if not _is_admin():
+        sys.stderr.write(
+            "ERROR: stopping services requires admin. Rerun as Administrator.\n"
+        )
+        return 1
+    rc, out, err = _stop_services()
+    sys.stdout.write(out)
+    sys.stderr.write(err)
+    return rc
+
+
+def cmd_status(_args):
+    states = _service_states()
+    print("Admin: %s" % ("yes" if _is_admin() else "no"))
+    print("Services:")
+    for name in reversed(SERVICE_NAMES):  # display in start order
+        print("  %-15s %s" % (name, states.get(name) or "(missing)"))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Built-in self-test (no real .shn file required)
 # ---------------------------------------------------------------------------
 def cmd_selftest(_args):
@@ -669,6 +965,33 @@ def build_parser():
     i.add_argument("input")
     i.add_argument("--encoding", default="utf-8", help=enc_help)
     i.set_defaults(func=cmd_info)
+
+    dp = sub.add_parser(
+        "deploy",
+        help="copy an edited .shn into the live server (and mirror to client)",
+    )
+    dp.add_argument("input", help="path to the edited .shn (e.g. ItemInfo.shn)")
+    dp.add_argument("--server-dir", default=None,
+                    help="server Shine dir (default: %s)" % DEFAULT_SERVER_DIR)
+    dp.add_argument("--client-dir", default=None,
+                    help="client ressystem dir (default: %s)" % DEFAULT_CLIENT_DIR)
+    dp.add_argument("--encoding", default="latin-1", help=enc_help)
+    dp.add_argument("--no-restart", action="store_true",
+                    help="skip stop/start of game services (file copy only)")
+    dp.add_argument("--dry-run", action="store_true",
+                    help="show what would happen without changing anything")
+    dp.add_argument("--force", action="store_true",
+                    help="allow deploying blocklisted files (e.g. QuestData.shn)")
+    dp.set_defaults(func=cmd_deploy)
+
+    st = sub.add_parser("start", help="start all Fiesta server services (admin)")
+    st.set_defaults(func=cmd_start)
+
+    sp = sub.add_parser("stop", help="stop all Fiesta server services (admin)")
+    sp.set_defaults(func=cmd_stop)
+
+    sts = sub.add_parser("status", help="show service status (admin not required)")
+    sts.set_defaults(func=cmd_status)
 
     s = sub.add_parser("selftest", help="run built-in correctness checks")
     s.set_defaults(func=cmd_selftest)
