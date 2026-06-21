@@ -1,13 +1,32 @@
 #!/usr/bin/env python3
-"""Build the [Master] Slash set across all relevant files.
+r"""Build the [Master] Slash set across all relevant files.
 
 One-off script: appends rows to the decoded CSVs, inserts a new pool record
-into ItemDropGroup.txt, and adds drop slots to D_Zombieking +
-D_GiantGobleKing in ItemDropTable.txt. After this runs, encode each
-.shn and deploy.
+into ItemDropGroup.txt, adds drop slots to D_Zombieking + D_GiantGobleKing
+in ItemDropTable.txt, clones view/render rows in ItemViewInfo.csv, and
+registers the random option groups in RandomOptionTable.txt. After this
+runs, encode each .shn and deploy.
 
-Run from the working folder containing the decoded CSVs, ItemDropGroup.txt
-and ItemDropTable.txt copies.
+Working folder must contain the following files pulled from the live server:
+
+  Decoded CSVs (from `python fiesta_shn.py decode <file>.shn --encoding latin-1`):
+    - ItemInfo.csv          (+ ItemInfo.schema.json)
+    - ItemInfoServer.csv    (+ ItemInfoServer.schema.json)
+    - GradeItemOption.csv   (+ GradeItemOption.schema.json)
+    - RandomOption.csv      (+ RandomOption.schema.json)
+    - RandomOptionCount.csv (+ RandomOptionCount.schema.json)
+    - ItemViewInfo.csv      (+ ItemViewInfo.schema.json)
+        source: Server\9Data\Shine\View\ItemViewInfo.shn
+
+  Plaintext drop / random-option tables (copy verbatim):
+    - ItemDropGroup.txt
+    - ItemDropTable.txt
+    - RandomOptionTable.txt
+        source: Server\9Data\Shine\World\*.txt
+
+The script is idempotent for the plaintext files (skips inserts if already
+present) but appends to the CSVs unconditionally -- if you've already run
+it once, re-decode the CSVs first.
 """
 import csv
 import sys
@@ -141,5 +160,74 @@ if not (zk_done and gk_done):
 with open("ItemDropTable.txt", "w", encoding="latin-1", newline="") as f:
     f.writelines(lines)
 print("  ItemDropTable.txt updated")
+
+# 8. ItemViewInfo.csv -- clone view/render rows for the new IDs.
+#    Without these the server's drop pipeline silently suppresses drops
+#    for the new items (no render entry = no drop, no log line).
+#    Templates pulled from live decode (Server\9Data\Shine\View\ItemViewInfo.shn).
+ARMOR_VIEW_TEMPLATE = ["52002","SlashArmor","51","ItemEqu000","0","-","0","-","0","0","0","0","0","0","2","-","HideArmor","1","1","1.0","GrdFigBody","0","SFX_ItemEqu","SFX_ItemPutAmor","SFX_ItemPutAmor","5","-"]
+PANTS_VIEW_TEMPLATE = ["52003","SlashPants","50","ItemEqu000","0","-","0","-","0","0","0","0","0","0","2","-","HidePants","1","2","1.0","GrdFigLeg","0","SFX_ItemEqu","SFX_ItemPutAmor","SFX_ItemPutAmor","5","-"]
+
+armor_view = list(ARMOR_VIEW_TEMPLATE)
+armor_view[0:2] = [str(ITEM_ID_ARMOR), INX_ARMOR]
+pants_view = list(PANTS_VIEW_TEMPLATE)
+pants_view[0:2] = [str(ITEM_ID_PANTS), INX_PANTS]
+append_csv("ItemViewInfo.csv", [armor_view, pants_view])
+
+# 9. RandomOptionTable.txt -- register the new random option groups.
+#    THIS file is the server's source of truth for random options at drop
+#    time, NOT RandomOption.shn (which appears to be legacy on this build).
+#    Without entries here, items reference an unknown group and drops are
+#    silently aborted.
+#    Format: DropItemIndex, OptionHide, MinOpCount, MaxOpCount,
+#            StrMin, StrMax, ConMin, ConMax, DexMin, DexMax,
+#            IntMin, IntMax, MenMin, MenMax, CheckSum
+#    Lock all 5 stats to exactly +20 by setting Min=Max=20 and Min/MaxOp=5.
+ropt_armor_record = (
+    "#RECORD\t%s\t0\t5\t5\t20\t20\t20\t20\t20\t20\t20\t20\t20\t20\t4\t;\t%s\t40\t\n"
+    % (ROPT_ARMOR, INX_ARMOR)
+)
+ropt_pants_record = (
+    "#RECORD\t%s\t0\t5\t5\t20\t20\t20\t20\t20\t20\t20\t20\t20\t20\t4\t;\t%s\t40\t\n"
+    % (ROPT_PANTS, INX_PANTS)
+)
+
+with open("RandomOptionTable.txt", "r", encoding="latin-1", newline="") as f:
+    rot_lines = f.readlines()
+
+inserted_a = inserted_p = False
+out_rot = []
+for line in rot_lines:
+    out_rot.append(line)
+    if (line.startswith("#RECORD\tRandomNamedA05\t")
+            and not inserted_a and ropt_armor_record not in "".join(rot_lines)):
+        out_rot.append(ropt_armor_record)
+        inserted_a = True
+        print("  inserted %s after RandomNamedA05" % ROPT_ARMOR)
+    elif (line.startswith("#RECORD\tRandomNamedP05\t")
+            and not inserted_p and ropt_pants_record not in "".join(rot_lines)):
+        out_rot.append(ropt_pants_record)
+        inserted_p = True
+        print("  inserted %s after RandomNamedP05" % ROPT_PANTS)
+
+# Skip-on-already-present (idempotent)
+if not inserted_a and ropt_armor_record in "".join(rot_lines):
+    print("  RandomOptionTable.txt already has %s -- skipping" % ROPT_ARMOR)
+if not inserted_p and ropt_pants_record in "".join(rot_lines):
+    print("  RandomOptionTable.txt already has %s -- skipping" % ROPT_PANTS)
+
+if inserted_a or inserted_p:
+    with open("RandomOptionTable.txt", "w", encoding="latin-1", newline="") as f:
+        f.writelines(out_rot)
+
 print()
 print("All edits applied. Next: encode each .shn and run verify.")
+print()
+print("Files modified (encode + deploy each):")
+print("  shn: ItemInfo, ItemInfoServer, GradeItemOption,")
+print("       RandomOption, RandomOptionCount, ItemViewInfo")
+print("  txt: ItemDropGroup, ItemDropTable, RandomOptionTable")
+print()
+print("Deploy paths (the toolkit's `deploy` defaults handle Shine root files;")
+print("for ItemViewInfo use --server-dir <...>\\Shine\\View, and copy the .txt")
+print("files into <...>\\Shine\\World manually with timestamped backups).")
