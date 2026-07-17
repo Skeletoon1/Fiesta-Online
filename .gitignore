@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Fiesta data / working files (don't commit game data or generated artifacts)
+*.shn
+*.shn.bak
+*.shn.tmp
+*.csv
+*.schema.json
+!tests/**/*.csv
+
+# Plaintext server data files pulled into the working folder for edits
+# (originals live under C:\FiestaServer\NA2016-main\Server\9Data\Shine\World\)
+ItemDropTable.txt
+ItemDropGroup.txt
+RandomOptionTable.txt
